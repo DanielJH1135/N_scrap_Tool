@@ -2,15 +2,13 @@ import streamlit as st
 import pandas as pd
 import time
 import random
-import re # 전화번호 추출용 정규식 라이브러리 추가
+import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 def get_industry_tag(category_text):
     if any(kw in category_text for kw in ['농장', '축산', '양돈', '계사', '목장']):
@@ -24,36 +22,45 @@ def get_industry_tag(category_text):
 def run_crawler(region, keyword, max_scroll=3):
     options = Options()
     
-    # 서버 환경 안정성 최적화 옵션
+    # [핵심] Streamlit Cloud 서버에 설치된 크롬 경로 강제 지정
+    options.binary_location = "/usr/bin/chromium"
+    
+    # 서버 환경(화면 없음) 필수 옵션
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") 
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     
-    # 봇 탐지 방지
+    # 네이버 봇 탐지 우회 옵션
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     options.add_argument(f"user-agent={user_agent}")
 
-    try:
-        service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception:
-        options.binary_location = "/usr/bin/chromium"
-        service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=options)
-        
-    wait = WebDriverWait(driver, 10)
+    # [핵심] 서버에 설치된 드라이버 경로 강제 지정
+    service = Service("/usr/bin/chromedriver")
     
+    try:
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        st.error(f"브라우저 초기화 실패 (packages.txt 설치 확인 필요): {e}")
+        return pd.DataFrame()
+
+    wait = WebDriverWait(driver, 10)
     data = []
+    
     try:
         url = f"https://map.naver.com/v5/search/{region} {keyword}"
         driver.get(url)
-        time.sleep(random.uniform(2, 4)) 
+        time.sleep(random.uniform(3, 5)) # 네이버 지도는 로딩이 길어 충분히 대기
         
-        wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+        try:
+            wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+        except:
+            st.warning("네이버 지도 로딩 지연 또는 일시적 봇 차단이 발생했습니다. 1~2분 뒤 다시 시도해주세요.")
+            driver.quit()
+            return pd.DataFrame()
         
         for _ in range(max_scroll):
             try:
@@ -71,7 +78,6 @@ def run_crawler(region, keyword, max_scroll=3):
                 name = item.find_element(By.CSS_SELECTOR, ".TYpbg").text
                 category = item.find_element(By.CSS_SELECTOR, ".K7094").text
                 
-                # [기능 추가] 텍스트 전체에서 전화번호 패턴 찾기 (정규식)
                 text_content = item.text
                 phone_match = re.search(r'(\d{2,4}-\d{3,4}-\d{4}|\d{4}-\d{4})', text_content)
                 phone_number = phone_match.group(0) if phone_match else "번호 미등록"
@@ -84,7 +90,7 @@ def run_crawler(region, keyword, max_scroll=3):
                     "업체명": name,
                     "기존분류": category,
                     "산업태그": get_industry_tag(category),
-                    "전화번호": phone_number, # 엑셀에 들어갈 열 추가!
+                    "전화번호": phone_number,
                     "지도링크": map_url
                 })
             except Exception:
@@ -110,7 +116,7 @@ with col1:
 with col2:
     keyword = st.text_input("검색 키워드 (예: 양돈농장, 공영주차장, 공단)", "양돈농장")
 
-scroll_cnt = st.slider("검색 깊이 (스크롤 횟수 - 높을수록 오래 걸림)", 1, 10, 6)
+scroll_cnt = st.slider("검색 깊이 (스크롤 횟수 - 높을수록 오래 걸림)", 1, 10, 2)
 
 if st.button("데이터 추출 시작", type="primary"):
     with st.spinner('서버에서 네이버 지도를 탐색 중입니다... (데이터 양에 따라 1~3분 소요)'):
@@ -128,4 +134,4 @@ if st.button("데이터 추출 시작", type="primary"):
                 mime="text/csv"
             )
         else:
-            st.error("데이터를 찾지 못했거나 일시적으로 접근이 지연되었습니다. 잠시 후 다시 시도해주세요.")
+            st.error("데이터 수집을 완료하지 못했습니다. 검색 조건을 바꾸거나 잠시 후 다시 시도해주세요.")
