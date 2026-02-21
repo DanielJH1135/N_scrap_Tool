@@ -3,13 +3,13 @@ import pandas as pd
 import time
 import random
 import re
-import shutil  # [추가됨] 설치 경로 자동 탐색용
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException
 
 def get_industry_tag(category_text):
     if any(kw in category_text for kw in ['농장', '축산', '양돈', '계사', '목장']):
@@ -23,39 +23,33 @@ def get_industry_tag(category_text):
 def run_crawler(region, keyword, max_scroll=3):
     options = Options()
     
-    # 서버 환경 최적화 옵션
+    # [핵심] Streamlit Cloud 리눅스 서버 고정 경로 (수정 절대 금지)
+    options.binary_location = "/usr/bin/chromium"
+    
+    # 필수 Headless 및 메모리 최적화 옵션 (서버 다운 방지)
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     
-    # 봇 탐지 방지
+    # 봇 탐지 우회
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     options.add_argument(f"user-agent={user_agent}")
 
-    # [핵심] 서버 내부의 크롬 및 드라이버 설치 경로를 자동으로 찾아냅니다.
-    chrome_path = shutil.which("chromium") or shutil.which("chromium-browser")
-    driver_path = shutil.which("chromedriver") or shutil.which("chromedriver-linux64")
-
-    if chrome_path:
-        options.binary_location = chrome_path
-
+    service = Service("/usr/bin/chromedriver")
+    
     try:
-        if driver_path:
-            service = Service(driver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-        else:
-            driver = webdriver.Chrome(options=options)
-    except Exception as e:
-        # 브라우저 실행 실패 시, 원인을 화면에 명확하게 띄워줍니다.
-        st.error("🚨 서버 브라우저 초기화 실패!")
-        st.code(f"에러 상세: {e}\n\n🔍 탐색된 크롬 경로: {chrome_path}\n🔍 탐색된 드라이버 경로: {driver_path}")
-        st.info("💡 위 경로가 'None'으로 나온다면 GitHub에 'packages.txt' 파일이 없거나 이름이 틀린 것입니다.")
-        return pd.DataFrame()
-
+        # 이 부분에서 에러가 나면 아래 except 구문으로 넘어가서 에러를 화면에 띄웁니다.
+        driver = webdriver.Chrome(service=service, options=options)
+    except WebDriverException as e:
+        st.error("🚨 크롬 브라우저를 실행할 수 없습니다. (SessionNotCreatedException)")
+        st.code(f"상세 에러 내역:\n{str(e)}")
+        st.info("💡 해결 방법: 패키지 설치가 꼬인 상태입니다. 앱을 삭제(Delete)하고 다시 배포(Deploy)해 주세요.")
+        return None # 실패 신호 반환
+        
     wait = WebDriverWait(driver, 10)
     data = []
     
@@ -67,7 +61,7 @@ def run_crawler(region, keyword, max_scroll=3):
         try:
             wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
         except:
-            st.warning("네이버 지도 로딩 지연 또는 일시적 봇 차단이 발생했습니다. 1~2분 뒤 다시 시도해주세요.")
+            st.warning("⚠️ 네이버 지도 로딩 지연 또는 일시적 차단. 잠시 후 다시 시도해주세요.")
             return pd.DataFrame()
         
         for _ in range(max_scroll):
@@ -130,7 +124,10 @@ if st.button("데이터 추출 시작", type="primary"):
     with st.spinner('서버에서 네이버 지도를 탐색 중입니다... (데이터 양에 따라 1~3분 소요)'):
         df = run_crawler(region, keyword, max_scroll=scroll_cnt)
         
-        if not df.empty:
+        if df is None:
+            # 브라우저 실행 실패 시, 아래 성공/실패 메시지를 띄우지 않고 중단
+            st.stop()
+        elif not df.empty:
             st.success(f"총 {len(df)}건의 고유 데이터를 성공적으로 추출했습니다!")
             st.dataframe(df, use_container_width=True)
             
@@ -141,5 +138,5 @@ if st.button("데이터 추출 시작", type="primary"):
                 file_name=f"섭외DB_{region}_{keyword}.csv",
                 mime="text/csv"
             )
-        elif 'df' in locals() and df.empty:
+        else:
             st.error("데이터 수집을 완료하지 못했습니다. 검색 조건을 바꾸거나 잠시 후 다시 시도해주세요.")
