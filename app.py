@@ -2,12 +2,15 @@ import streamlit as st
 import pandas as pd
 import time
 import random
+import re # 전화번호 추출용 정규식 라이브러리 추가
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 def get_industry_tag(category_text):
     if any(kw in category_text for kw in ['농장', '축산', '양돈', '계사', '목장']):
@@ -21,25 +24,27 @@ def get_industry_tag(category_text):
 def run_crawler(region, keyword, max_scroll=3):
     options = Options()
     
-    # [수정됨] Streamlit Cloud(리눅스) 환경에 맞춘 브라우저 경로 직접 지정
-    options.binary_location = "/usr/bin/chromium"
-    
-    # 서버 환경 필수 옵션 (화면 없음, 메모리 최적화 등)
-    options.add_argument("--headless=new")
+    # 서버 환경 안정성 최적화 옵션
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
     
-    # 차단 방지 (User-Agent 변조 및 자동화 플래그 제거)
+    # 봇 탐지 방지
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     options.add_argument(f"user-agent={user_agent}")
 
-    # [수정됨] 서버에 설치된 드라이버 경로 직접 지정 (webdriver_manager 사용 안 함)
-    service = Service("/usr/bin/chromedriver")
-    
-    driver = webdriver.Chrome(service=service, options=options)
+    try:
+        service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception:
+        options.binary_location = "/usr/bin/chromium"
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+        
     wait = WebDriverWait(driver, 10)
     
     data = []
@@ -48,10 +53,8 @@ def run_crawler(region, keyword, max_scroll=3):
         driver.get(url)
         time.sleep(random.uniform(2, 4)) 
         
-        # iframe 전환
         wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
         
-        # 스크롤 컨테이너 찾기 및 스크롤 다운 (더 많은 데이터 확보)
         for _ in range(max_scroll):
             try:
                 elements = driver.find_elements(By.CSS_SELECTOR, ".UE715")
@@ -61,7 +64,6 @@ def run_crawler(region, keyword, max_scroll=3):
             except:
                 break
 
-        # 데이터 수집
         items = driver.find_elements(By.CSS_SELECTOR, ".UE715")
         
         for item in items:
@@ -69,7 +71,11 @@ def run_crawler(region, keyword, max_scroll=3):
                 name = item.find_element(By.CSS_SELECTOR, ".TYpbg").text
                 category = item.find_element(By.CSS_SELECTOR, ".K7094").text
                 
-                # 지도 링크 추출
+                # [기능 추가] 텍스트 전체에서 전화번호 패턴 찾기 (정규식)
+                text_content = item.text
+                phone_match = re.search(r'(\d{2,4}-\d{3,4}-\d{4}|\d{4}-\d{4})', text_content)
+                phone_number = phone_match.group(0) if phone_match else "번호 미등록"
+                
                 link_element = item.find_element(By.TAG_NAME, "a")
                 place_id = link_element.get_attribute("href").split('/')[-1].split('?')[0]
                 map_url = f"https://map.naver.com/p/entry/place/{place_id}"
@@ -78,15 +84,16 @@ def run_crawler(region, keyword, max_scroll=3):
                     "업체명": name,
                     "기존분류": category,
                     "산업태그": get_industry_tag(category),
+                    "전화번호": phone_number, # 엑셀에 들어갈 열 추가!
                     "지도링크": map_url
                 })
-            except Exception as e:
+            except Exception:
                 continue
                 
     finally:
-        driver.quit()
+        if 'driver' in locals():
+            driver.quit()
     
-    # 중복 데이터 제거 (업체명 기준)
     df = pd.DataFrame(data)
     if not df.empty:
         df = df.drop_duplicates(subset=['업체명'], keep='first')
